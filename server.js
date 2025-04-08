@@ -93,6 +93,18 @@ app.post('/store-response', (req, res) => {
   }
 });
 
+app.get('/responses', (req, res) => {
+  try {
+    const data = fs.readFileSync(responsesPath);
+    const parsed = JSON.parse(data);
+    res.json(parsed);
+  } catch (err) {
+    console.error("Error reading responses.json:", err.message);
+    res.status(500).json({ message: "Failed to load data" });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
