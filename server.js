@@ -8,11 +8,11 @@ const path = require('path');
 
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const carriersPath = path.join(__dirname, 'carriers.json');
 const responsesPath = path.join(__dirname, 'responses.json');
 
-// Load carriers (fail fast with clear logs if missing/invalid)
 let carriers = [];
 try {
   carriers = JSON.parse(fs.readFileSync(carriersPath, 'utf8'));
@@ -22,7 +22,6 @@ try {
   process.exit(1);
 }
 
-// Ensure responses.json exists
 try {
   if (!fs.existsSync(responsesPath)) {
     fs.writeFileSync(responsesPath, JSON.stringify([], null, 2));
@@ -31,13 +30,15 @@ try {
   console.error('Failed to init responses.json:', e.message);
 }
 
-// Helpers
-const toDigits = v => {
-  if (v === undefined || v === null) return '';
-  return String(v).trim();
-};
+const toStr = v => (v === undefined || v === null ? '' : String(v).trim());
 
-// --- Health & root ---
+const getFirst = (...vals) => {
+  for (const v of vals) {
+    const s = toStr(v);
+    if (s !== '') return s;
+  }
+  return '';
+};
 
 app.get('/health', (_req, res) => {
   res.status(200).send('ok');
@@ -47,21 +48,17 @@ app.get('/', (_req, res) => {
   res.send('carrier-checker: up');
 });
 
-// --- Routes ---
-
-// Route to check carrier registration
+// Check carrier (accepts mc_number OR dot_number; camelCase and query supported)
 app.post('/check-carrier', (req, res) => {
-  const mc_number = toDigits(req.body.mc_number);
-  const dot_number = toDigits(req.body.dot_number);
+  const mc_number  = getFirst(req.body.mc_number,  req.body.mcNumber,  req.query.mc_number,  req.query.mcNumber);
+  const dot_number = getFirst(req.body.dot_number, req.body.dotNumber, req.query.dot_number, req.query.dotNumber);
 
   if (!mc_number && !dot_number) {
-    return res
-      .status(400)
-      .json({ status: 'bad_request', message: 'Provide mc_number and/or dot_number.' });
+    return res.status(400).json({ status: 'bad_request', message: 'Provide mc_number and/or dot_number.' });
   }
 
   const found = carriers.find(c =>
-    (!mc_number || c.mc_number === mc_number) &&
+    (!mc_number  || c.mc_number  === mc_number) &&
     (!dot_number || c.dot_number === dot_number)
   );
 
@@ -70,26 +67,21 @@ app.post('/check-carrier', (req, res) => {
   }
 
   if ((found.status || '').toLowerCase() !== 'active') {
-    return res.json({
-      status: 'inactive',
-      message: 'Carrier found but is not active.',
-      carrier: found
-    });
+    return res.json({ status: 'inactive', message: 'Carrier found but is not active.', carrier: found });
   }
 
   return res.json({ status: 'found', carrier: found });
 });
 
-// Flexible list query with filters
-// Example: /carriers?status=Active&city=Chicago&zip=60601
+// List carriers with filters
 app.get('/carriers', (req, res) => {
   const q = {
-    status: (req.query.status || '').trim().toLowerCase(),
-    city:   (req.query.city || '').trim().toLowerCase(),
-    zip:    (req.query.zip || '').trim(),
-    name:   (req.query.name || '').trim().toLowerCase(),
-    mc:     toDigits(req.query.mc_number),
-    dot:    toDigits(req.query.dot_number)
+    status: toStr(req.query.status).toLowerCase(),
+    city:   toStr(req.query.city).toLowerCase(),
+    zip:    toStr(req.query.zip),
+    name:   toStr(req.query.name).toLowerCase(),
+    mc:     getFirst(req.query.mc_number, req.query.mcNumber),
+    dot:    getFirst(req.query.dot_number, req.query.dotNumber)
   };
 
   let results = carriers.filter(c => {
@@ -109,29 +101,29 @@ app.get('/carriers', (req, res) => {
   res.json({ count: results.length, results });
 });
 
-// Get single carrier by MC or DOT
+// Get single carrier by either MC or DOT
 app.get('/carrier/:id', (req, res) => {
-  const id = toDigits(req.params.id);
+  const id = toStr(req.params.id);
   const found = carriers.find(c => c.mc_number === id || c.dot_number === id);
   if (!found) return res.status(404).json({ message: 'Carrier not found.' });
   res.json(found);
 });
 
 app.get('/carrier/dot/:dot', (req, res) => {
-  const dot = toDigits(req.params.dot);
+  const dot = toStr(req.params.dot);
   const found = carriers.find(c => c.dot_number === dot);
   if (!found) return res.status(404).json({ message: 'Carrier not found.' });
   res.json(found);
 });
 
 app.get('/carrier/mc/:mc', (req, res) => {
-  const mc = toDigits(req.params.mc);
+  const mc = toStr(req.params.mc);
   const found = carriers.find(c => c.mc_number === mc);
   if (!found) return res.status(404).json({ message: 'Carrier not found.' });
   res.json(found);
 });
 
-// Store response data (auto-enrich with carrier metadata)
+// Store response (auto-enrich from carriers.json when carrier_mc provided)
 app.post('/store-response', (req, res) => {
   const { response } = req.body;
 
@@ -140,7 +132,7 @@ app.post('/store-response', (req, res) => {
   }
 
   let carrierMeta = {};
-  const carrierMcDigits = toDigits(response.carrier_mc);
+  const carrierMcDigits = toStr(response.carrier_mc);
   if (carrierMcDigits) {
     const hit = carriers.find(c => c.mc_number === carrierMcDigits);
     if (hit) {
@@ -157,9 +149,9 @@ app.post('/store-response', (req, res) => {
 
   const newEntry = {
     carrier_mc: carrierMcDigits || null,
-    carrier_name: response.carrier_name || null,
-    phone_number: response.phone_number ? String(response.phone_number).trim() : null,
-    dispatcher_name: response.dispatcher_name ? String(response.dispatcher_name).trim() : null,
+    carrier_name: toStr(response.carrier_name) || null,
+    phone_number: toStr(response.phone_number) || null,
+    dispatcher_name: toStr(response.dispatcher_name) || null,
     timestamp: new Date().toISOString(),
     ...carrierMeta
   };
@@ -196,6 +188,6 @@ app.get('/responses', (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
