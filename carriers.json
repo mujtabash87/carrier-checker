@@ -20,3 +20,4 @@
   { "carrier_name": "Tau Logistics Group", "mc_number": "787878", "dot_number": "909090", "status": "Active", "city": "Nashville", "zip": "37201" },
   { "carrier_name": "Upsilon Express", "mc_number": "898989", "dot_number": "101010", "status": "Inactive", "city": "Indianapolis", "zip": "46201" }
 ]
+

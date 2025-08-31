@@ -1,3 +1,4 @@
+// server.js
 const express = require('express');
 const fs = require('fs');
 const app = express();
@@ -11,36 +12,58 @@ app.use(express.json());
 const carriersPath = path.join(__dirname, 'carriers.json');
 const responsesPath = path.join(__dirname, 'responses.json');
 
-// Load carriers (with status, city, zip)
-const carriers = JSON.parse(fs.readFileSync(carriersPath));
+// Load carriers (fail fast with clear logs if missing/invalid)
+let carriers = [];
+try {
+  carriers = JSON.parse(fs.readFileSync(carriersPath, 'utf8'));
+  if (!Array.isArray(carriers)) throw new Error('carriers.json must be an array');
+} catch (e) {
+  console.error('Failed to load carriers.json:', e.message);
+  process.exit(1);
+}
 
 // Ensure responses.json exists
-if (!fs.existsSync(responsesPath)) {
-  fs.writeFileSync(responsesPath, JSON.stringify([], null, 2));
+try {
+  if (!fs.existsSync(responsesPath)) {
+    fs.writeFileSync(responsesPath, JSON.stringify([], null, 2));
+  }
+} catch (e) {
+  console.error('Failed to init responses.json:', e.message);
 }
 
 // Helpers
-const norm = v => (typeof v === 'string' ? v.trim() : v);
-const isMatch = (carrier, mc, dot) => {
-  // If both provided, require both; if one provided, match that one.
-  const mcOk = mc ? carrier.mc_number === mc : true;
-  const dotOk = dot ? carrier.dot_number === dot : true;
-  return mcOk && dotOk;
+const toDigits = v => {
+  if (v === undefined || v === null) return '';
+  return String(v).trim();
 };
+
+// --- Health & root ---
+
+app.get('/health', (_req, res) => {
+  res.status(200).send('ok');
+});
+
+app.get('/', (_req, res) => {
+  res.send('carrier-checker: up');
+});
 
 // --- Routes ---
 
-// Route to check carrier registration (now returns status/city/zip)
-// Also surfaces "inactive" when carrier exists but status !== 'Active'
+// Route to check carrier registration
 app.post('/check-carrier', (req, res) => {
-  const mc_number = norm(req.body.mc_number);
-  const dot_number = norm(req.body.dot_number);
+  const mc_number = toDigits(req.body.mc_number);
+  const dot_number = toDigits(req.body.dot_number);
 
   if (!mc_number && !dot_number) {
-    return res.status(400).json({ status: 'bad_request', message: 'Provide mc_number and/or dot_number.' });
+    return res
+      .status(400)
+      .json({ status: 'bad_request', message: 'Provide mc_number and/or dot_number.' });
   }
 
-  const found = carriers.find(c => isMatch(c, mc_number, dot_number));
+  const found = carriers.find(c =>
+    (!mc_number || c.mc_number === mc_number) &&
+    (!dot_number || c.dot_number === dot_number)
+  );
 
   if (!found) {
     return res.json({ status: 'not_found', message: 'Carrier is not registered.' });
@@ -57,18 +80,16 @@ app.post('/check-carrier', (req, res) => {
   return res.json({ status: 'found', carrier: found });
 });
 
-// New: flexible list query with filters (status, city, zip, name)
+// Flexible list query with filters
 // Example: /carriers?status=Active&city=Chicago&zip=60601
 app.get('/carriers', (req, res) => {
-  const { status, city, zip, name, mc_number, dot_number, limit } = req.query;
-
   const q = {
-    status: status ? status.trim().toLowerCase() : null,
-    city: city ? city.trim().toLowerCase() : null,
-    zip: zip ? zip.trim() : null,
-    name: name ? name.trim().toLowerCase() : null,
-    mc: mc_number ? mc_number.trim() : null,
-    dot: dot_number ? dot_number.trim() : null
+    status: (req.query.status || '').trim().toLowerCase(),
+    city:   (req.query.city || '').trim().toLowerCase(),
+    zip:    (req.query.zip || '').trim(),
+    name:   (req.query.name || '').trim().toLowerCase(),
+    mc:     toDigits(req.query.mc_number),
+    dot:    toDigits(req.query.dot_number)
   };
 
   let results = carriers.filter(c => {
@@ -81,36 +102,36 @@ app.get('/carriers', (req, res) => {
     return true;
   });
 
-  const max = Number.isFinite(parseInt(limit, 10)) ? parseInt(limit, 10) : undefined;
+  const limit = parseInt(req.query.limit, 10);
+  const max = Number.isFinite(limit) ? limit : undefined;
   if (max) results = results.slice(0, max);
 
   res.json({ count: results.length, results });
 });
 
-// New: get single carrier by MC or DOT
-// Example: /carrier/123456  OR /carrier/dot/654321
+// Get single carrier by MC or DOT
 app.get('/carrier/:id', (req, res) => {
-  const id = norm(req.params.id);
+  const id = toDigits(req.params.id);
   const found = carriers.find(c => c.mc_number === id || c.dot_number === id);
   if (!found) return res.status(404).json({ message: 'Carrier not found.' });
   res.json(found);
 });
 
 app.get('/carrier/dot/:dot', (req, res) => {
-  const dot = norm(req.params.dot);
+  const dot = toDigits(req.params.dot);
   const found = carriers.find(c => c.dot_number === dot);
   if (!found) return res.status(404).json({ message: 'Carrier not found.' });
   res.json(found);
 });
 
 app.get('/carrier/mc/:mc', (req, res) => {
-  const mc = norm(req.params.mc);
+  const mc = toDigits(req.params.mc);
   const found = carriers.find(c => c.mc_number === mc);
   if (!found) return res.status(404).json({ message: 'Carrier not found.' });
   res.json(found);
 });
 
-// Store response data (now auto-enriches with carrier status/city/zip when carrier_mc provided)
+// Store response data (auto-enrich with carrier metadata)
 app.post('/store-response', (req, res) => {
   const { response } = req.body;
 
@@ -118,10 +139,10 @@ app.post('/store-response', (req, res) => {
     return res.status(400).json({ message: 'Missing response data' });
   }
 
-  // Enrichment: if carrier_mc present, attach known carrier metadata
   let carrierMeta = {};
-  if (response.carrier_mc) {
-    const hit = carriers.find(c => c.mc_number === String(response.carrier_mc).trim());
+  const carrierMcDigits = toDigits(response.carrier_mc);
+  if (carrierMcDigits) {
+    const hit = carriers.find(c => c.mc_number === carrierMcDigits);
     if (hit) {
       carrierMeta = {
         carrier_name: hit.carrier_name,
@@ -130,23 +151,22 @@ app.post('/store-response', (req, res) => {
         carrier_zip: hit.zip || null,
         carrier_dot: hit.dot_number || null
       };
-      // Default carrier_name to dataset value if not provided by client
       if (!response.carrier_name) response.carrier_name = hit.carrier_name;
     }
   }
 
   const newEntry = {
-    carrier_mc: response.carrier_mc || null,
+    carrier_mc: carrierMcDigits || null,
     carrier_name: response.carrier_name || null,
-    phone_number: response.phone_number || null,
-    dispatcher_name: response.dispatcher_name || null,
+    phone_number: response.phone_number ? String(response.phone_number).trim() : null,
+    dispatcher_name: response.dispatcher_name ? String(response.dispatcher_name).trim() : null,
     timestamp: new Date().toISOString(),
     ...carrierMeta
   };
 
   let existingData = [];
   try {
-    const raw = fs.readFileSync(responsesPath);
+    const raw = fs.readFileSync(responsesPath, 'utf8');
     existingData = JSON.parse(raw);
     if (!Array.isArray(existingData)) existingData = [];
   } catch (err) {
@@ -167,7 +187,7 @@ app.post('/store-response', (req, res) => {
 // Read stored responses
 app.get('/responses', (req, res) => {
   try {
-    const data = fs.readFileSync(responsesPath);
+    const data = fs.readFileSync(responsesPath, 'utf8');
     const parsed = JSON.parse(data);
     res.json(parsed);
   } catch (err) {
